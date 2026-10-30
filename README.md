@@ -1,3 +1,5 @@
+![Banner](banner.png)
+
 # iacs-IaCDriftDetector
 A command-line tool that compares the currently deployed infrastructure state with the IaC configuration to detect configuration drift. Reports differences and potential security implications. - Focused on Utilities designed to statically analyze Infrastructure-as-Code files (e.g., Terraform, CloudFormation, Ansible playbooks) for security misconfigurations, insecure defaults, and compliance violations.
 
