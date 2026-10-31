@@ -77,53 +77,95 @@ class IaCDriftDetector:
             description (str): A descriptive text for logging purposes.
 
         Returns:
-            bool: True if drift is detected, False otherwise.
+            bool: True if drift is detected, False otherwise. A path
+            present on one side only counts as drift. Parse and
+            comparison errors raise instead of returning False, and an
+            expression that matches nothing on either side raises
+            ValueError, because no comparison was performed.
         """
-        try:
-            jsonpath_expr = parse(jsonpath_expression)
+        jsonpath_expr = parse(jsonpath_expression)
 
-            iac_results = [match.value for match in jsonpath_expr.find(self.iac_data)]
-            deployed_results = [match.value for match in jsonpath_expr.find(self.deployed_state_data)]
+        iac_results = [match.value for match in jsonpath_expr.find(self.iac_data)]
+        deployed_results = [match.value for match in jsonpath_expr.find(self.deployed_state_data)]
 
+        if not iac_results and not deployed_results:
+            raise ValueError(
+                f"JSONPath expression '{jsonpath_expression}' returned no results on either side; "
+                "no comparison was performed."
+            )
 
-            if not iac_results:
-                logging.warning(f"JSONPath expression '{jsonpath_expression}' returned no results in IaC configuration.")
-                return False
+        if not iac_results or not deployed_results:
+            missing_side = "IaC configuration" if not iac_results else "deployed state"
+            present_results = deployed_results if not iac_results else iac_results
+            logging.warning(f"Drift detected for: {description} (JSONPath: {jsonpath_expression})")
+            logging.warning(f"  The expression returned no results in {missing_side}.")
+            logging.warning(f"  Present side value: {present_results}")
+            return True
 
-            if not deployed_results:
-                logging.warning(f"JSONPath expression '{jsonpath_expression}' returned no results in deployed state.")
-                return False
-
-            if iac_results != deployed_results:
-                logging.warning(f"Drift detected for: {description} (JSONPath: {jsonpath_expression})")
-                logging.warning(f"  IaC Configuration: {iac_results}")
-                logging.warning(f"  Deployed State: {deployed_results}")
-                return True
-            else:
-                logging.info(f"No drift detected for: {description} (JSONPath: {jsonpath_expression})")
-                return False
-
-        except Exception as e:
-            logging.error(f"Error during comparison for JSONPath '{jsonpath_expression}': {e}")
+        if iac_results != deployed_results:
+            logging.warning(f"Drift detected for: {description} (JSONPath: {jsonpath_expression})")
+            logging.warning(f"  IaC Configuration: {iac_results}")
+            logging.warning(f"  Deployed State: {deployed_results}")
+            return True
+        else:
+            logging.info(f"No drift detected for: {description} (JSONPath: {jsonpath_expression})")
             return False
 
     def run_security_checks(self):
         """
         Performs security-related checks by comparing specific configurations.
-        Example checks are included; customize as needed.
+        The default expressions carry a wildcard label segment, so they
+        match labelled resources (resource.aws_s3_bucket.<label>.acl and
+        its siblings) as well as the unlabelled shape.
+
+        Returns:
+            bool: True if any check reports drift. Raises ValueError
+            when a default check matches nothing on either side, so a
+            run that compared nothing never completes clean.
         """
         logging.info("Running security checks...")
 
-        # Example 1: Check for public access to a storage bucket
-        self.compare("$.resource.aws_s3_bucket.acl", "S3 Bucket ACL",)
+        checks = [
+            (["$.resource.aws_s3_bucket.*.acl", "$.resource.aws_s3_bucket.acl"], "S3 Bucket ACL"),
+            (["$.resource.aws_security_group.*.ingress[*].cidr_blocks",
+              "$.resource.aws_security_group.ingress[*].cidr_blocks"], "Security Group Ingress CIDR Blocks"),
+            (["$.resource.aws_db_instance.*.storage_encrypted",
+              "$.resource.aws_db_instance.storage_encrypted"], "Database Storage Encryption Status"),
+        ]
 
-        # Example 2: Check for open security groups
-        self.compare("$.resource.aws_security_group.ingress[*].cidr_blocks", "Security Group Ingress CIDR Blocks")
+        drift_found = False
+        unmatched = []
+        for expressions, description in checks:
+            try:
+                if self._compare_any(expressions, description):
+                    drift_found = True
+            except ValueError:
+                unmatched.append(expressions[0])
 
-        # Example 3: Ensure encryption is enabled for databases
-        self.compare("$.resource.aws_db_instance.storage_encrypted", "Database Storage Encryption Status")
+        if unmatched:
+            raise ValueError(
+                "Default security checks matched nothing on either side, so no comparison was "
+                f"performed for: {', '.join(unmatched)}"
+            )
 
         logging.info("Security checks completed.")
+        return drift_found
+
+    def _compare_any(self, expressions, description=""):
+        """
+        Tries each expression in order and returns the verdict of the
+        first one that matches on at least one side. Raises ValueError
+        when none of them matched anything on either side.
+        """
+        for expression in expressions:
+            try:
+                return self.compare(expression, description)
+            except ValueError:
+                continue
+        raise ValueError(
+            f"None of the expressions {expressions} returned results on either side; "
+            "no comparison was performed."
+        )
 
 
 def setup_argparse():
@@ -169,9 +211,13 @@ def main():
             if not args.description:
                 logging.error("Description is required when using --jsonpath.")
                 sys.exit(1)
-            detector.compare(args.jsonpath, args.description)
+            drift_found = detector.compare(args.jsonpath, args.description)
         else:
-            detector.run_security_checks()
+            drift_found = detector.run_security_checks()
+
+        if drift_found:
+            logging.warning("Drift detected; exiting with code 1.")
+            sys.exit(1)
 
     except Exception as e:
         logging.error(f"An error occurred: {e}")
