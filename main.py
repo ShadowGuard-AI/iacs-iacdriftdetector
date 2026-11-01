@@ -102,6 +102,9 @@ class IaCDriftDetector:
             logging.warning(f"  Present side value: {present_results}")
             return True
 
+        # The two match lists are compared as lists, order included. The same
+        # values found in a different document order on the two sides are
+        # reported as drift, even though as sets they are identical.
         if iac_results != deployed_results:
             logging.warning(f"Drift detected for: {description} (JSONPath: {jsonpath_expression})")
             logging.warning(f"  IaC Configuration: {iac_results}")
@@ -125,6 +128,10 @@ class IaCDriftDetector:
         """
         logging.info("Running security checks...")
 
+        # The default checks are three fixed AWS paths in the parsed shape an
+        # HCL loader would produce. The files this tool loads are YAML or JSON,
+        # so the state file has to be written in that same nested shape by
+        # hand; a real Terraform state file does not look like this.
         checks = [
             (["$.resource.aws_s3_bucket.*.acl", "$.resource.aws_s3_bucket.acl"], "S3 Bucket ACL"),
             (["$.resource.aws_security_group.*.ingress[*].cidr_blocks",
@@ -142,6 +149,11 @@ class IaCDriftDetector:
             except ValueError:
                 unmatched.append(expressions[0])
 
+        # Unmatched checks are collected across all three defaults and raised
+        # together at the end. Because the raise replaces the return, a run
+        # where one check found real drift and another matched nothing exits
+        # through the error path in main, and the drift verdict itself is only
+        # in the warning lines above.
         if unmatched:
             raise ValueError(
                 "Default security checks matched nothing on either side, so no comparison was "
@@ -159,6 +171,10 @@ class IaCDriftDetector:
         """
         for expression in expressions:
             try:
+                # The first expression that matches anything on either side decides
+                # the check. An expression that matches on one side only returns drift
+                # at once, and the fallback expression is never tried, even though it
+                # might have matched both sides cleanly.
                 return self.compare(expression, description)
             except ValueError:
                 continue
